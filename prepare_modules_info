@@ -1,0 +1,168 @@
+#!/bin/bash
+# Copyright (C) Labris Teknoloji Bilisim Cozumleri Ltd. Sti., 2015.
+# All rights reserved
+#===================================================================================
+#
+# FILE: prepare_modules_info
+#
+# USAGE: prepare_modules_info
+#
+# DESCRIPTION: create ethernet modules port info 
+#
+# AUTHOR: Niyazi Sırt <niyazi.sirt@labrisnetworks.com>
+# CREATED: 2015/07/23
+#===================================================================================
+TEMP="/tmp/by_1"
+TEMP_LSHW_OUT="/tmp/by_2"
+TEMP_MODULE_COUNT="/tmp/by_3"
+BRIDGES="/opt/labris/share/labris-bypass/br"
+SETUP_BR="/etc/labris/setup_harpp_bridge.sh"
+MODULE_1="/opt/labris/share/labris-bypass/m1"
+MODULE_2="/opt/labris/share/labris-bypass/m2"
+MODULE_3="/opt/labris/share/labris-bypass/m3"
+MODULE_4="/opt/labris/share/labris-bypass/m4"
+MODULE_5="/opt/labris/share/labris-bypass/m5"
+MODULE_6="/opt/labris/share/labris-bypass/m6"
+TEMP_LSHW_OUT="lshw_out"
+TEMP_LSPCI_OUT="lspci_out"
+
+bypassd="/opt/labris/bin/labris-bypass"
+i2c_bus_address="/opt/labris/share/labris-bypass/i2c.address"
+nvram="/opt/labris/share/labris-bypass/bypass-nvram"
+
+# remove info files
+rm -f $MODULE_1
+rm -f $MODULE_2
+rm -f $MODULE_3
+rm -f $BRIDGES
+
+hwcode=$(cat /etc/labris/hwcode);
+
+if [ "$hwcode" == "fw-8892" ]; then
+    model_name="MB-887X";
+elif [ "$hwcode" == "fw-8895" ]; then
+    model_name="MB-8895";
+elif [ "$hwcode" == "fw-8771" ]; then
+    model_name="MB-8771EXT";
+fi
+
+if [ "$hwcode" != "fw-8771" ]; then
+    # determine i2c address.
+    address=$($bypassd -M $model_name -S | grep "read byte command" | awk -F":" '{print $2}' | awk -F")" '{print $1}');
+    rm -f $i2c_bus_address;
+    pre=0;
+    count=0;
+    for item in $address; do
+        current=$(echo $item | awk -F"x" '{print $2}');
+        if [ $count -ne 0 ];then
+            sum=$((current - pre));
+            if [ $sum -gt 1 ]; then
+                echo "">>${i2c_bus_address};
+            fi
+        fi
+        echo $item>>${i2c_bus_address};
+        pre=$current;
+        count=$((count + 1))
+    done
+else
+    # TODO: multi module test
+    echo "0x37">${i2c_bus_address};
+fi
+
+# store lshw output
+$(lshw -c network -businfo | grep pci>$TEMP_LSHW_OUT);
+# store lspci output
+$(lspci -t -v | grep -i network>$TEMP_LSPCI_OUT);
+
+
+# getting modul knowledge
+# k: modul chipset
+# x: number of each module
+# y: total port number of each module 
+# z: default port number of module
+# t: check counter
+# modules_port_list[k]="x y z t"
+declare -A modules_port_list
+# store port number for each ethernet modules
+cat $TEMP_LSHW_OUT | awk '{print $4}'|sort|uniq -c>$TEMP_MODULE_COUNT;
+for name_line in $(cat $TEMP_MODULE_COUNT | awk '{print $2}'); do
+    modules_count=0
+    port_count=0
+    for line in $(cat $TEMP_LSPCI_OUT | grep $name_line | tr '|' ' ' | awk -F" " '{print $1}'); do
+        curr=$(echo ${line} | cut -c 1)
+        # we understand last port of module from "\" character 
+        if [ "$curr" == '\' ]; then
+            modules_count=$(($modules_count + 1))
+        fi
+        port_count=$(($port_count + 1))
+        
+    done
+    if [ $modules_count -eq 0 ]; then
+        modules_count=1
+    fi
+    modules_port_list[$name_line]="$modules_count $port_count "$((port_count / modules_count))" 0" 
+done
+
+# debug modules data
+# for key in ${!modules_port_list[@]}; do
+#     echo ${key} ${modules_port_list[${key}]}
+# done
+
+module_number=1
+# prepare file name according to module name
+real_file=$(eval "echo \${MODULE_$module_number}");
+$(rm -f $real_file)
+
+length=$(cat $TEMP_LSHW_OUT | wc -l)
+for ((i=1; i<=$length; i++)); do
+    lshw_line=$(sed -n "$i"p $TEMP_LSHW_OUT)
+
+    # getting modul knowledge
+    temp_model=$(echo $lshw_line | awk -F" " '{print $4}')
+    module_counter=$(echo ${modules_port_list[${temp_model}]} |awk '{print $1}')
+    port_counter=$(echo ${modules_port_list[${temp_model}]} |awk '{print $2}')
+    default_port_count=$(echo ${modules_port_list[${temp_model}]} |awk '{print $3}')
+    check_counter=$(echo ${modules_port_list[${temp_model}]} |awk '{print $4}')
+    
+    # skip first pair because of management port just for fw-8871
+    if [ $module_number -eq 1 ]; then
+        if [ "$hwcode" == "fw-8771" ]; then
+            if [ $i -lt 3 ]; then
+                check_counter=$((check_counter + 1))
+                port_counter=$((port_counter - 1))
+                modules_port_list[${temp_model}]="$module_counter $port_counter $default_port_count $check_counter"
+                continue
+            fi
+        fi
+    fi
+    # add iface to module file
+    $(echo $lshw_line | awk -F" " '{print $2}'>>$real_file)
+
+    # update module knowledge
+    check_counter=$((check_counter + 1))
+    port_counter=$((port_counter - 1))    
+    if [ $check_counter -eq $default_port_count ]; then
+        module_counter=$((module_counter - 1 ))
+        module_number=$((module_number + 1))
+        check_counter=0
+        real_file=$(eval "echo \${MODULE_$module_number}");
+        $(rm -f $real_file)
+    fi
+    modules_port_list[${temp_model}]="$module_counter $port_counter $default_port_count $check_counter"
+done
+
+# determinate and write using ifaces
+$(cat $SETUP_BR | grep up | awk '{print $2}'>>$BRIDGES);
+
+# remove temporory files
+rm -f $TEMP;
+rm -f $TEMP_LSHW_OUT;
+rm -f $TEMP_MODULE_COUNT;
+
+# write optimum settings to nvram
+check_nvram=$(cat $nvram)
+echo $check_nvram
+if [ "$check_nvram" == "0" ]; then
+    $($bypassd write nwram);
+    echo "1">$nvram;
+fi

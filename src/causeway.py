@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import sh
+import sys
 import time
 import constants
 from daemon import Daemon
@@ -12,9 +13,11 @@ class Causeway(Daemon):
         """
         init functions
         """
-        super(Causeway, self).__init__(_pid_file)
+        super(Causeway, self).__init__(_pid_file, stdout=constants.LOG_FILE)
         self.ethernet_modules = []
         self.model_name = ""
+
+
 
     def read_model_name(self):
         """
@@ -28,10 +31,13 @@ class Causeway(Daemon):
         """
         This is run method
         """
+        print "merhaba"
         while True:
+            print "merhaba2"
+            # sys.stdout.write("merhaba2")
             # TODO: core causeway process
             time.sleep(3)
 
 if __name__ == '__main__':
     causewayd = Causeway(constants.PID_FILE)
-    causewayd.start()
+    causewayd.run()
